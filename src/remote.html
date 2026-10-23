@@ -932,7 +932,23 @@
     // would see Ctrl+AltGr+2, not «@». The Ctrl that came with it is let go.
     if (code === 100 && e.getModifierState('AltGraph') && down.has(29)) { down.delete(29); hand('k 29 0'); }
     if (code === 1) escAt = performance.now();
+    if (PHONE && !MODIFIERS.has(code)) heldAsSaid(e);
     down.add(code); hand('k ' + code + ' 1');
+  }
+  // On a phone or a tablet, Shift, Alt and Ctrl at home as a key says they
+  // are held: Android lets one of them go on its own (Alt+Shift, then Q came
+  // without the Shift).
+  const SAID = [['shiftKey', 42, 54], ['altKey', 56, 100], ['ctrlKey', 29, 97]];
+  function heldAsSaid(e) {
+    if (e.getModifierState('AltGraph')) return;
+    for (const [flag, left, right] of SAID) {
+      const held = down.has(left) || down.has(right);
+      if (e[flag] && !held) { down.add(left); hand('k ' + left + ' 1'); plog('held again as the key says: ' + flag); }
+      if (!e[flag] && held) {
+        for (const c of [left, right]) if (down.has(c)) { down.delete(c); hand('k ' + c + ' 0'); }
+        plog('let go as the key says: ' + flag);
+      }
+    }
   }
   function keyUp(e) {
     const code = codeOf(e);

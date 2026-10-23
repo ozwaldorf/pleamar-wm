@@ -1167,22 +1167,39 @@
   window.addEventListener('resize', () => { if (!document.activeElement || document.activeElement !== keys) turned(); });
   if (screen.orientation) screen.orientation.addEventListener('change', turned);
   // Android takes Escape for Back as well, and Back, at the start of an
-  // installed page's history, leaves it. A step of history kept in hand
-  // while the session is here: Back goes home as Escape, unless the key
-  // itself just did. (Put in by a tap or a key: one put in without them,
-  // the browser would step over.)
+  // installed page's history, leaves it. Kept in hand while the session is
+  // here (a close watcher, or a step of history where there is none): Back
+  // goes home as Escape, unless the key itself just did. (Put in by a tap or
+  // a key: one put in without them, the browser would step over.)
+  let watcher = null;
   const held = () => history.state && history.state.held;
-  const holdBack = () => { if (PHONE && phoneHere && !held()) history.pushState({ held: true }, ''); };
-  window.addEventListener('popstate', () => {
-    if (!PHONE || !phoneHere) return;
+  const backHome = (how) => {
     const key = performance.now() - escAt < 600;
-    plog('back' + (key ? ', from Escape' : ''));
+    plog('back by ' + how + (key ? ', from Escape' : ''));
     if (!key) { hand('k 1 1'); hand('k 1 0'); }
+  };
+  const holdBack = () => {
+    if (!PHONE || !phoneHere) return;
+    if (!window.CloseWatcher) { if (!held()) history.pushState({ held: true }, ''); return; }
+    if (watcher) return;
+    try { watcher = new CloseWatcher(); } catch (e) { plog('no close watcher: ' + e.message); return; }
+    watcher.onclose = () => { watcher = null; backHome('the close watcher'); holdBack(); };
+  };
+  const letBack = () => {
+    if (watcher) { watcher.onclose = null; watcher.destroy(); watcher = null; }
+    letBack();
+  };
+  window.addEventListener('popstate', () => {
+    if (!PHONE || !phoneHere || window.CloseWatcher) return;
+    backHome('history');
     holdBack();
   });
   if (PHONE) {
     window.addEventListener('pointerdown', holdBack, true);
-    window.addEventListener('keydown', holdBack, true);
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Escape') plog('Escape here' + (watcher ? ', watched' : held() ? ', a step held' : ', nothing held'));
+      holdBack();
+    }, true);
   }
   function phoneArrived() {
     phoneHere = true;

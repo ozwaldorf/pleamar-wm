@@ -16,6 +16,10 @@
 //! as a video track only if not: a track goes through the browser's jitter
 //! buffer, which waits to smooth the picture out, and here every millisecond
 //! between a touch and its picture counts more than smoothness.
+//!
+//! The sound goes as an audio track (Opus), when the page asks for one: what
+//! the computer plays, taken by ffmpeg from the default output's monitor
+//! while the way is there.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,6 +138,9 @@ fn run(mut rtc: Rtc, socket: UdpSocket, frames: mpsc::Receiver<(bool, Vec<u8>)>,
     // Not reachable since then: often a moment (the wifi, a phone waking), so
     // given a while to come back before it ends.
     let mut lost: Option<Instant> = None;
+    // The sound: its track, ffmpeg taking it, and how far it has gone (48 kHz).
+    let mut sound: Option<(Mid, Pt, Sound, u64)> = None;
+    let mut connected = false;
     while alive.load(Ordering::Relaxed) {
         if lost.is_some_and(|t| t.elapsed() > LOST_GRACE) || !rtc.is_alive() {
             return Ok("the page is not reachable any more");
@@ -222,12 +229,21 @@ fn run(mut rtc: Rtc, socket: UdpSocket, frames: mpsc::Receiver<(bool, Vec<u8>)>,
                         };
                     }
                     Event::Connected => {
+                        connected = true;
                         let _ = events.send(PeerEvent::Connected);
                     }
                     Event::MediaAdded(m) if m.kind == MediaKind::Video => {
                         let pt = rtc.writer(m.mid).and_then(|w| h264(w.payload_params().map(|p| (p.pt(), p.spec())).collect()));
                         if let Some(pt) = pt {
                             video = Some((m.mid, pt));
+                        }
+                    }
+                    Event::MediaAdded(m) if m.kind == MediaKind::Audio && sound.is_none() => {
+                        let pt = rtc.writer(m.mid).and_then(|w| w.payload_params().find(|p| p.spec().codec == Codec::Opus).map(|p| p.pt()));
+                        match (pt, Sound::start()) {
+                            (Some(pt), Ok(s)) => sound = Some((m.mid, pt, s, 0)),
+                            (None, _) => println!("remote · no sound: the page takes no Opus"),
+                            (_, Err(e)) => println!("remote · no sound: {e}"),
                         }
                     }
                     Event::ChannelOpen(id, label) if label == "video" => {
@@ -263,6 +279,25 @@ fn run(mut rtc: Rtc, socket: UdpSocket, frames: mpsc::Receiver<(bool, Vec<u8>)>,
                 continue;
             }
         };
+        // The sound that came, onto its track once the way is open.
+        if let Some((mid, pt, s, at)) = sound.as_mut() {
+            let mut broke = None;
+            while let Ok(packet) = s.packets.try_recv() {
+                *at += OPUS_FRAME;
+                if !connected {
+                    continue;
+                }
+                let Some(writer) = rtc.writer(*mid) else { continue };
+                if let Err(e) = writer.write(*pt, Instant::now(), MediaTime::new(*at, Frequency::FORTY_EIGHT_KHZ), packet) {
+                    broke = Some(e.to_string());
+                    break;
+                }
+            }
+            if let Some(e) = broke {
+                println!("remote · the sound stops: {e}");
+                sound = None;
+            }
+        }
         // Wait for the network, but come back soon for the frames.
         let wait = timeout.saturating_duration_since(Instant::now()).min(Duration::from_millis(2));
         if wait.is_zero() {
@@ -282,6 +317,72 @@ fn run(mut rtc: Rtc, socket: UdpSocket, frames: mpsc::Receiver<(bool, Vec<u8>)>,
     }
     rtc.disconnect();
     Ok("closed from here")
+}
+
+/// Samples in each Opus packet ffmpeg makes (20 ms at 48 kHz).
+const OPUS_FRAME: u64 = 960;
+
+/// What the computer plays (the default output's monitor), as Opus packets.
+struct Sound {
+    child: std::process::Child,
+    packets: mpsc::Receiver<Vec<u8>>,
+}
+
+impl Sound {
+    fn start() -> Result<Sound, String> {
+        let mut child = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "pulse", "-fragment_size", "1920", "-i", "@DEFAULT_MONITOR@"])
+            .args(["-ac", "2", "-ar", "48000", "-c:a", "libopus", "-b:a", "128k", "-application", "lowdelay", "-frame_duration", "20"])
+            .args(["-f", "ogg", "-page_duration", "20000", "-flush_packets", "1", "-"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("ffmpeg: {e}"))?;
+        let out = child.stdout.take().ok_or("ffmpeg: no output")?;
+        // (A second of it at most waiting: what the way could not take is dropped.)
+        let (tx, packets) = mpsc::sync_channel(50);
+        std::thread::spawn(move || opus_packets(out, tx));
+        println!("remote · the sound goes too");
+        Ok(Sound { child, packets })
+    }
+}
+
+impl Drop for Sound {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The packets of an Ogg stream of Opus (RFC 7845), after its head and tags.
+fn opus_packets(mut out: impl std::io::Read, tx: mpsc::SyncSender<Vec<u8>>) {
+    let (mut packet, mut count) = (Vec::new(), 0u32);
+    let mut head = [0u8; 27];
+    loop {
+        if out.read_exact(&mut head).is_err() || &head[..4] != b"OggS" {
+            return;
+        }
+        let mut lacing = vec![0u8; head[26] as usize];
+        if out.read_exact(&mut lacing).is_err() {
+            return;
+        }
+        // A packet ends with a segment shorter than 255 (it may go on in the next page).
+        for len in lacing {
+            let at = packet.len();
+            packet.resize(at + len as usize, 0);
+            if out.read_exact(&mut packet[at..]).is_err() {
+                return;
+            }
+            if len < 255 {
+                count += 1;
+                if count > 2 && matches!(tx.try_send(std::mem::take(&mut packet)), Err(mpsc::TrySendError::Disconnected(_))) {
+                    return;
+                }
+                packet.clear();
+            }
+        }
+    }
 }
 
 /// The H.264 the page takes, one frame per packet group (mode 1): High

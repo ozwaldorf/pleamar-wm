@@ -112,9 +112,11 @@ rustPlatform.buildRustPackage {
           swaybg
           # The agent's pictures and the remote desktop's: the monitors
           # taken (grim), as video (wf-recorder), the clipboard both ways,
-          # and the notice when someone signs in from elsewhere.
+          # and the notice when someone signs in from elsewhere; its
+          # sound (ffmpeg).
           grim
           wf-recorder
+          ffmpeg
           wl-clipboard
           libnotify
           # Build (Super+B): its AI engine runs with Node, fetched by npm

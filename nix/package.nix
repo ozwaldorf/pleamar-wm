@@ -24,6 +24,8 @@
   pipewire,
   openssl,
   ffmpeg,
+  libopus,
+  wireplumber,
   grim,
   wf-recorder,
   wl-clipboard,
@@ -71,6 +73,8 @@ rustPlatform.buildRustPackage {
     openssl
     # …and its video (`pleamar-wm-stream`, built with it): the card's encoder.
     ffmpeg
+    # …and its sound.
+    libopus
   ];
 
   # The session and the remote's video (`stream`).
@@ -112,17 +116,23 @@ rustPlatform.buildRustPackage {
           swaybg
           # The agent's pictures and the remote desktop's: the monitors
           # taken (grim), as video (wf-recorder), the clipboard both ways,
-          # and the notice when someone signs in from elsewhere; its
-          # sound (ffmpeg).
+          # and the notice when someone signs in from elsewhere.
           grim
           wf-recorder
-          ffmpeg
           wl-clipboard
           libnotify
           # Build (Super+B): its AI engine runs with Node, fetched by npm
           # the first time, in a bubblewrap sandbox.
           nodejs
           bubblewrap
+        ]
+      } \
+      --suffix PATH : ${
+        # The phone as an output (pw-cli, wpctl): after the system's own,
+        # which speak to the PipeWire that runs.
+        lib.makeBinPath [
+          pipewire
+          wireplumber
         ]
       } \
       --set-default FONTCONFIG_FILE ${fontconfig.out}/etc/fonts/fonts.conf
